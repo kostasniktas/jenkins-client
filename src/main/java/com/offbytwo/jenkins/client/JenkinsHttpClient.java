@@ -6,11 +6,13 @@
 
 package com.offbytwo.jenkins.client;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.offbytwo.jenkins.client.util.HttpResponseContentExtractor;
-import com.offbytwo.jenkins.client.validator.HttpResponseValidator;
-import com.offbytwo.jenkins.model.BaseModel;
-import com.offbytwo.jenkins.model.Crumb;
+import static com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES;
+import static org.apache.commons.lang.StringUtils.isNotBlank;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+
 import org.apache.http.HttpResponse;
 import org.apache.http.auth.AuthScope;
 import org.apache.http.auth.UsernamePasswordCredentials;
@@ -26,12 +28,11 @@ import org.apache.http.message.BasicHeader;
 import org.apache.http.protocol.BasicHttpContext;
 import org.apache.http.util.EntityUtils;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.URI;
-
-import static com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES;
-import static org.apache.commons.lang.StringUtils.isNotBlank;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.offbytwo.jenkins.client.util.HttpResponseContentExtractor;
+import com.offbytwo.jenkins.client.validator.HttpResponseValidator;
+import com.offbytwo.jenkins.model.BaseModel;
+import com.offbytwo.jenkins.model.Crumb;
 
 public class JenkinsHttpClient {
 
@@ -43,6 +44,7 @@ public class JenkinsHttpClient {
 
     private ObjectMapper mapper;
     private String context;
+    private String prefix;
 
     /**
      * Create an unauthenticated Jenkins HTTP client
@@ -72,13 +74,14 @@ public class JenkinsHttpClient {
     }
 
     /**
-     * Create an authenticated Jenkins HTTP client
+     * Create an authenticated Jenkins HTTP client with a prefix
      *
      * @param uri      Location of the jenkins server (ex. http://localhost:8080)
+     * @param prefix   A prefix to all other queries/posts/etc. Useful for folders.  (ex. /job/FolderName)
      * @param username Username to use when connecting
      * @param password Password or auth token to use when connecting
      */
-    public JenkinsHttpClient(URI uri, String username, String password) {
+    public JenkinsHttpClient(URI uri, String prefix, String username, String password) {
         this(uri);
         if (isNotBlank(username)) {
             CredentialsProvider provider = client.getCredentialsProvider();
@@ -89,8 +92,23 @@ public class JenkinsHttpClient {
             localContext = new BasicHttpContext();
             localContext.setAttribute("preemptive-auth", new BasicScheme());
             client.addRequestInterceptor(new PreemptiveAuth(), 0);
+
+            this.prefix = prefix;
         }
     }
+
+
+    /**
+     * Create an authenticated Jenkins HTTP client
+     *
+     * @param uri      Location of the jenkins server (ex. http://localhost:8080)
+     * @param username Username to use when connecting
+     * @param password Password or auth token to use when connecting
+     */
+    public JenkinsHttpClient(URI uri, String username, String password) {
+        this (uri, "", username, password);
+    }
+
 
     /**
      * Perform a GET request and parse the response to the given class
@@ -102,7 +120,11 @@ public class JenkinsHttpClient {
      * @throws IOException, HttpResponseException
      */
     public <T extends BaseModel> T get(String path, Class<T> cls) throws IOException {
-        HttpGet getMethod = new HttpGet(api(path));
+        return get(path, cls, true);
+    }
+
+    public <T extends BaseModel> T get(String path, Class<T> cls, boolean withPrefix) throws IOException {
+        HttpGet getMethod = new HttpGet(api(path, withPrefix));
         HttpResponse response = client.execute(getMethod, localContext);
         try {
             httpResponseValidator.validateResponse(response);
@@ -121,7 +143,7 @@ public class JenkinsHttpClient {
      * @throws IOException, HttpResponseException
      */
     public String get(String path) throws IOException {
-        HttpGet getMethod = new HttpGet(api(path));
+        HttpGet getMethod = new HttpGet(api(path, true));
         HttpResponse response = client.execute(getMethod, localContext);
         try {
             httpResponseValidator.validateResponse(response);
@@ -161,8 +183,8 @@ public class JenkinsHttpClient {
      * @throws IOException, HttpResponseException
      */
     public <R extends BaseModel, D> R post(String path, D data, Class<R> cls) throws IOException {
-        HttpPost request = new HttpPost(api(path));
-        Crumb crumb = get("/crumbIssuer", Crumb.class);
+        HttpPost request = new HttpPost(api(path, true));
+        Crumb crumb = get("/crumbIssuer", Crumb.class, false);
         if (crumb != null) {
             request.addHeader(new BasicHeader(crumb.getCrumbRequestField(), crumb.getCrumb()));
         }
@@ -201,9 +223,9 @@ public class JenkinsHttpClient {
     }
 
     public String post_xml(String path, String xml_data, boolean crumbFlag) throws IOException {
-        HttpPost request = new HttpPost(api(path));
+        HttpPost request = new HttpPost(api(path, true));
         if (crumbFlag == true) {
-            Crumb crumb = get("/crumbIssuer", Crumb.class);
+            Crumb crumb = get("/crumbIssuer", Crumb.class, false);
             if (crumb != null) {
                 request.addHeader(new BasicHeader(crumb.getCrumbRequestField(), crumb.getCrumb()));
             }
@@ -242,8 +264,11 @@ public class JenkinsHttpClient {
         return path1 + path2;
     }
 
-    private URI api(String path) {
+    private URI api(String path, boolean withPrefix) {
         if (!path.toLowerCase().matches("https?://.*")) {
+            if (withPrefix) {
+                path = urlJoin(prefix, path);
+            }
             path = urlJoin(this.context, path);
         }
         if (!path.contains("?")) {
